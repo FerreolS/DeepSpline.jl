@@ -24,31 +24,84 @@ please see https://arxiv.org/abs/1802.09210.
 """
 
 using Flux
-using Flux: binarycrossentropy
 
 # Aliases
 export deepspline
 
 struct deepspline
+    N::Integer # Number of activation function
+    K::Integer # Number of nodes
+    FirstIndexes::Array{Int32} # index of the first node of each activation function
     coefs::Array{Float32}
-    # knots::LinRange
-    knots::Array{Float32}
+    T::Float32 # step
+    Kmin::Integer 
+    Kmax::Integer 
 end
 
-deepspline(in::Integer, knots) =
-  deepspline(randn(Float32,in), knots)
-  
-function deepspline( K::Integer)
-    T = 2 ./ (K-2);
-    knots = collect(LinRange(-1-T, 1+T, K));
-    coefs = max.(knots,0);
-    coefs[2:end] = coefs[2:end] + coefs[1:end-1]
-    coefs = coefs ./ coefs[end-1];
-    deepspline(coefs, knots)
+# Default node between -1 and 1.
+deepspline( K::Integer) = deepspline(1,K)
+
+# Default node between -1 and 1.
+deepspline(N::Integer, K::Integer) = deepspline(N,K,2f0 /(K-3))
+
+function deepspline(N::Integer, K::Integer,T::Float32)
+    @assert isodd(K) "K must be an odd number!"
+    Kmin = -(K-1)/2+1;
+    Kmax = (K-1)/2-1;
+    
+    coefs = zeros(Float32,K,N);
+    for n in 1:N
+        coefs[:,n] = BsplineCoef_relu(K,T)
+        #= if isodd(n)
+            coefs[:,n] = BsplineCoef_relu(K,T)
+        else
+            coefs[:,n] = BsplineCoef_abs(K,T)
+        end =#
+    end
+    FirstIndexes = Int32.(collect(((1:N) .- 1 ).*K));
+    deepspline(N, K,FirstIndexes,coefs,T,Kmin, Kmax)
 end
-function (m::deepspline)(x::AbstractArray) 
-    knots, coefs = m.knots, m.coefs;
-    step = knots[2] - knots[1];
+
+function BsplineCoef_abs(K::Integer,T::Float32)
+    @assert isodd(K) "K must be an odd number!"
+    K0 = Integer((K-1)/2+1);
+    coefs = zeros(Float32,K);
+    coefs[K0+1:end] .= T;
+    coefs[K0+1:end] = cumsum(coefs[K0+1:end]);
+    coefs[1:K0-1] = coefs[end:-1:K0+1];
+    return coefs
+end
+
+function BsplineCoef_relu(K::Integer,T::Float32)
+    @assert isodd(K) "K must be an odd number!"
+    K0 = Integer((K-1)/2+1);
+    coefs = zeros(Float32,K);
+    coefs[K0+1:end] .= T;
+    coefs[K0+1:end] = cumsum(coefs[K0+1:end]);
+    return coefs
+end
+
+function BsplineCoef_id(K::Integer,T::Float32)
+    @assert isodd(K) "K must be an odd number!"
+    K0 = Integer((K-1)/2+1);
+    coefs = zeros(Float32,K);
+    coefs[K0+1:end] .= T;
+    coefs[K0+1:end] = cumsum(coefs[K0+1:end]);
+    coefs[1:K0-1] = -coefs[end:-1:K0+1];
+    return coefs
+end
+
+function BsplineCoef_soft(K::Integer,T::Float32)
+    @assert isodd(K) "K must be an odd number!"
+    K0 = Integer((K-1)/2+1);
+    coefs = zeros(Float32,K);
+    coefs[K0+1:end] .= T;
+    coefs[K0+1:end] = max.(0f0,cumsum(coefs[K0+1:end]).-0.5f0);
+    coefs[1:K0-1] = -coefs[end:-1:K0+1];
+    return coefs
+end
+function (self::deepspline)(x::AbstractArray) 
+    coefs,N, K,FirstIndexes,T,Kmin, Kmax = self.coefs, self.N, self.K, self.FirstIndexes, self.T,self.Kmin, self.Kmax    
 
     #k = collect(knots);
     # Linear extrapolations:
@@ -56,10 +109,10 @@ function (m::deepspline)(x::AbstractArray)
     # f(x_right) = second rightmost coeff value + right_slope * (x - second rightmost coeff)
     # where the first components of the sums (leftmost/second rightmost coeff value)
     # are taken into account in DeepBspline_Func() and linearExtrapolations adds the rest.
-    leftmost_slope = (coefs[2] .- coefs[1]) ./ (knots[2] - knots[1]);
-    rightmost_slope = (coefs[end] .- coefs[end - 1]) ./ (knots[end] - knots[end-1]);
-    leftExtrapolations  = min.((x .- knots[2]), 0f0) .* leftmost_slope;
-    rightExtrapolations  = max.((x .- knots[end-1]), 0f0) .* rightmost_slope;
+    leftmost_slope = (coefs[2,:] .- coefs[1,:]) ./ T;
+    rightmost_slope = (coefs[end,:] .- coefs[end - 1,:]) ./ T;
+    leftExtrapolations  = min.((x .- Kmin.*T), 0f0) .* leftmost_slope;
+    rightExtrapolations  = max.((x .- Kmax.*T), 0f0) .* rightmost_slope;
     linearExtrapolations = leftExtrapolations .+ rightExtrapolations;
     
 
@@ -69,18 +122,25 @@ function (m::deepspline)(x::AbstractArray)
     # For the values outside the range, linearExtrapolations will add what remains
     # to compute the final output of the activation, taking into account the slopes
     # on the left and right.
-    xc = clamp.(x, knots[2], knots[end-1]);
+    xc = clamp.(x, Kmin.*T, Kmax.*T);
      # This gives the indexes (in coefficients_vect) of the left coefficients
-   # indexes  = (xc .- knots[1]) ./ step .+ 1f0 ;
-   # floored_indexes = Int64.(floor.(indexes));
-    #fracs = indexes .- floored_indexes ;
-    #activation_output = coefs[floored_indexes .+ 1 ] .* fracs .+ coefs[floored_indexes] .* (1f0 .- fracs) .+ linearExtrapolations; 
-
-    floored_indexes = searchsortedlast(knots, xc);
-    activation_output = coefs[floored_indexes] .* (xc .- knots[floored_indexes]) .+ coefs[floored_indexes] .* (knots[floored_indexes+1].-xc) .+ linearExtrapolations; 
+    indexes  = (xc .- (Kmin-1).*T) ./ T .+ 1f0 ;
+    floored_indexes = Int32.(floor.(indexes));
+    fracs = indexes .- floored_indexes ;
+    floored_indexes = floored_indexes.+FirstIndexes;
+    activation_output = coefs[floored_indexes .+ 1 ] .* fracs .+ coefs[floored_indexes] .* (1f0 .- fracs) .+ linearExtrapolations; 
 
     return activation_output
 end
+
+function TV2(self::deepspline)
+    coefs = self.coefs;
+    D2 = self.coefs[1:end-2,:] .- 2f0 *self.coefs[2:end-1,:] .+ self.coefs[3:end,:] 
+    return(sum(abs.(D2)));
+end
+
+
+
 
 Flux.@functor deepspline (coefs,)
 Flux.trainable(m::deepspline) = (m.coefs,)
