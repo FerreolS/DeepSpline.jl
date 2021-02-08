@@ -1,4 +1,5 @@
-""" This code implements linear splines activation functions.
+""" This code is the Julia implementation of Pytorch code from Joaquim Campos  (https://github.com/joaquimcampos/DeepSplines).
+It implements linear splines activation functions.
 A linear spline activation with parameters {a_k} and b1, b0, with knots placed
 on a grid of spacing T, is described as:
 deepspline(x) = sum_k [a_k * ReLU(x-kT)] + (b1*x + b0)
@@ -21,6 +22,11 @@ The regularization term applied to this function is:
 TV(2)(deepsline) = ||a||_1 = ||Lc||_1
 For the theoretical motivation and optimality results,
 please see https://arxiv.org/abs/1802.09210.
+
+This file if part of DeepSpline.jl software (https://github.com/FerreolS/DeepSpline.jl )
+licensed under the MIT license.
+
+Copyright (C) 2021, Ferréol Soulez.
 """
 
 using Flux
